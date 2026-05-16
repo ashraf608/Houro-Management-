@@ -273,3 +273,195 @@ with check (
   bucket_id = 'operation-proofs'
   and public.current_app_role() in ('admin', 'supervisor', 'accountant', 'worker')
 );
+
+-- =========================
+-- Gym training module
+-- =========================
+create type public.exercise_type as enum ('strength', 'cardio', 'mobility', 'bodyweight');
+create type public.review_period as enum ('weekly', 'monthly');
+
+create table public.training_programs (
+  id uuid primary key default gen_random_uuid(),
+  title text not null,
+  description text,
+  goal text,
+  difficulty_level smallint not null default 1 check (difficulty_level between 1 and 5),
+  created_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table public.exercises (
+  id uuid primary key default gen_random_uuid(),
+  name text not null unique,
+  muscle_group text,
+  exercise_type public.exercise_type not null default 'strength',
+  instructions text,
+  created_at timestamptz not null default now()
+);
+
+create table public.training_program_exercises (
+  id uuid primary key default gen_random_uuid(),
+  program_id uuid not null references public.training_programs(id) on delete cascade,
+  exercise_id uuid not null references public.exercises(id) on delete restrict,
+  day_number smallint not null default 1 check (day_number >= 1),
+  target_sets smallint not null default 3 check (target_sets > 0),
+  target_reps_min smallint check (target_reps_min > 0),
+  target_reps_max smallint check (target_reps_max > 0),
+  target_weight_kg numeric(6,2) check (target_weight_kg >= 0),
+  rest_seconds integer default 90 check (rest_seconds >= 0),
+  sort_order integer not null default 1,
+  unique (program_id, exercise_id, day_number)
+);
+
+create table public.athlete_programs (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  program_id uuid not null references public.training_programs(id) on delete cascade,
+  start_date date not null default current_date,
+  end_date date,
+  is_active boolean not null default true,
+  created_at timestamptz not null default now(),
+  unique (user_id, program_id, start_date)
+);
+
+create table public.workout_sessions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  program_id uuid references public.training_programs(id) on delete set null,
+  session_date date not null default current_date,
+  duration_minutes integer check (duration_minutes >= 0),
+  perceived_effort smallint check (perceived_effort between 1 and 10),
+  notes text,
+  created_at timestamptz not null default now()
+);
+
+create table public.workout_sets (
+  id uuid primary key default gen_random_uuid(),
+  session_id uuid not null references public.workout_sessions(id) on delete cascade,
+  exercise_id uuid not null references public.exercises(id) on delete restrict,
+  set_number smallint not null check (set_number > 0),
+  reps smallint check (reps >= 0),
+  weight_kg numeric(6,2) check (weight_kg >= 0),
+  distance_km numeric(6,2) check (distance_km >= 0),
+  duration_seconds integer check (duration_seconds >= 0),
+  is_completed boolean not null default true,
+  created_at timestamptz not null default now(),
+  unique (session_id, exercise_id, set_number)
+);
+
+create table public.performance_reviews (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  period_type public.review_period not null,
+  period_start date not null,
+  period_end date not null,
+  consistency_score smallint check (consistency_score between 0 and 100),
+  strength_score smallint check (strength_score between 0 and 100),
+  endurance_score smallint check (endurance_score between 0 and 100),
+  overall_score smallint generated always as (
+    coalesce(consistency_score, 0) * 0.4 + coalesce(strength_score, 0) * 0.3 + coalesce(endurance_score, 0) * 0.3
+  ) stored,
+  coach_notes text,
+  created_at timestamptz not null default now(),
+  check (period_end >= period_start)
+);
+
+create table public.progress_snapshots (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  snapshot_date date not null default current_date,
+  body_weight_kg numeric(6,2) check (body_weight_kg > 0),
+  body_fat_percent numeric(5,2) check (body_fat_percent >= 0 and body_fat_percent <= 100),
+  chest_cm numeric(6,2) check (chest_cm > 0),
+  waist_cm numeric(6,2) check (waist_cm > 0),
+  thigh_cm numeric(6,2) check (thigh_cm > 0),
+  notes text,
+  created_at timestamptz not null default now(),
+  unique (user_id, snapshot_date)
+);
+
+create trigger trg_training_programs_updated_at before update on public.training_programs for each row execute function public.touch_updated_at();
+
+alter table public.training_programs enable row level security;
+alter table public.exercises enable row level security;
+alter table public.training_program_exercises enable row level security;
+alter table public.athlete_programs enable row level security;
+alter table public.workout_sessions enable row level security;
+alter table public.workout_sets enable row level security;
+alter table public.performance_reviews enable row level security;
+alter table public.progress_snapshots enable row level security;
+
+create policy "training_programs_read_all" on public.training_programs for select to authenticated using (true);
+create policy "training_programs_manage_staff" on public.training_programs for all using (public.current_app_role() in ('admin', 'supervisor')) with check (public.current_app_role() in ('admin', 'supervisor'));
+
+create policy "exercises_read_all" on public.exercises for select to authenticated using (true);
+create policy "exercises_manage_staff" on public.exercises for all using (public.current_app_role() in ('admin', 'supervisor')) with check (public.current_app_role() in ('admin', 'supervisor'));
+
+create policy "program_exercises_read_all" on public.training_program_exercises for select to authenticated using (true);
+create policy "program_exercises_manage_staff" on public.training_program_exercises for all using (public.current_app_role() in ('admin', 'supervisor')) with check (public.current_app_role() in ('admin', 'supervisor'));
+
+create policy "athlete_programs_read_own_or_staff" on public.athlete_programs for select using (user_id = auth.uid() or public.current_app_role() in ('admin', 'supervisor'));
+create policy "athlete_programs_manage_own_or_staff" on public.athlete_programs for all using (user_id = auth.uid() or public.current_app_role() in ('admin', 'supervisor')) with check (user_id = auth.uid() or public.current_app_role() in ('admin', 'supervisor'));
+
+create policy "workout_sessions_read_own_or_staff" on public.workout_sessions for select using (user_id = auth.uid() or public.current_app_role() in ('admin', 'supervisor'));
+create policy "workout_sessions_manage_own_or_staff" on public.workout_sessions for all using (user_id = auth.uid() or public.current_app_role() in ('admin', 'supervisor')) with check (user_id = auth.uid() or public.current_app_role() in ('admin', 'supervisor'));
+
+create policy "workout_sets_read_own_or_staff" on public.workout_sets for select using (
+  exists (
+    select 1 from public.workout_sessions ws
+    where ws.id = workout_sets.session_id
+      and (ws.user_id = auth.uid() or public.current_app_role() in ('admin', 'supervisor'))
+  )
+);
+create policy "workout_sets_manage_own_or_staff" on public.workout_sets for all using (
+  exists (
+    select 1 from public.workout_sessions ws
+    where ws.id = workout_sets.session_id
+      and (ws.user_id = auth.uid() or public.current_app_role() in ('admin', 'supervisor'))
+  )
+) with check (
+  exists (
+    select 1 from public.workout_sessions ws
+    where ws.id = workout_sets.session_id
+      and (ws.user_id = auth.uid() or public.current_app_role() in ('admin', 'supervisor'))
+  )
+);
+
+create policy "performance_reviews_read_own_or_staff" on public.performance_reviews for select using (user_id = auth.uid() or public.current_app_role() in ('admin', 'supervisor'));
+create policy "performance_reviews_manage_staff" on public.performance_reviews for all using (public.current_app_role() in ('admin', 'supervisor')) with check (public.current_app_role() in ('admin', 'supervisor'));
+
+create policy "progress_snapshots_read_own_or_staff" on public.progress_snapshots for select using (user_id = auth.uid() or public.current_app_role() in ('admin', 'supervisor'));
+create policy "progress_snapshots_manage_own_or_staff" on public.progress_snapshots for all using (user_id = auth.uid() or public.current_app_role() in ('admin', 'supervisor')) with check (user_id = auth.uid() or public.current_app_role() in ('admin', 'supervisor'));
+
+create or replace function public.get_athlete_progress_kpis(p_user_id uuid, p_from date default current_date - 30, p_to date default current_date)
+returns table (
+  sessions_count bigint,
+  sets_count bigint,
+  total_reps bigint,
+  total_volume_kg numeric,
+  avg_perceived_effort numeric,
+  body_weight_change_kg numeric
+)
+language sql
+security definer
+as $$
+  with sessions as (
+    select id, perceived_effort
+    from public.workout_sessions
+    where user_id = p_user_id
+      and session_date between p_from and p_to
+  ),
+  progress as (
+    select
+      (select body_weight_kg from public.progress_snapshots where user_id = p_user_id and snapshot_date <= p_from order by snapshot_date desc limit 1) as w_from,
+      (select body_weight_kg from public.progress_snapshots where user_id = p_user_id and snapshot_date <= p_to order by snapshot_date desc limit 1) as w_to
+  )
+  select
+    (select count(*) from sessions) as sessions_count,
+    coalesce((select count(*) from public.workout_sets s where s.session_id in (select id from sessions)), 0) as sets_count,
+    coalesce((select sum(reps) from public.workout_sets s where s.session_id in (select id from sessions)), 0) as total_reps,
+    coalesce((select sum(coalesce(weight_kg, 0) * coalesce(reps, 0)) from public.workout_sets s where s.session_id in (select id from sessions)), 0) as total_volume_kg,
+    coalesce((select avg(perceived_effort::numeric) from sessions), 0) as avg_perceived_effort,
+    (select w_to - w_from from progress) as body_weight_change_kg;
+$$;
